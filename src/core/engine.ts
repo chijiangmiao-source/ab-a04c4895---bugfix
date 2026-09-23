@@ -78,59 +78,101 @@ function minimizeOr(children: Mask[][], limit: number): Mask[] {
 /**
  * AND 归并：候选割集 = 从每个子门各取一个割集后的并集，再取极小族。
  *
- * 不能按输入逐个折叠并在中间结果上判上限——后续合取支可能使族大幅坍缩
- * （例如 2187 个组合再与“全部事件”单割集相与，最终只剩 1 个）。
- * 这里对全部子门做组合枚举，并按最终并集的基数 s 从小到大处理：
- * 基数更大的候选不可能吸收更小的候选，所以处理完 s 后，
- * 大小 ≤s 的极小割集已经全部确定，保留集此后只增不减，
- * 此时越过上限即为门最终族的真实超限。
+ * 绝不能在“逐输入折叠的中间产物”上判上限——尚未并入的合取支可能使族大幅坍缩：
+ * 五组 6 选 1 的中间积有 6^5=7776 个候选，但再与仅含 7 个合法组合的许可门相与，
+ * 最终族坍缩为 7 个割集；在折叠中途判限会把这种模型误报为 complexity_limit。
+ *
+ * 这里按“最终并集基数 s”从小到大逐桶 DFS 枚举：
+ *   - 同基数的不同集合互不为真超集，因此同桶内去重后全部是极小割集；
+ *   - 跨桶吸收只可能由更小的已保留割集造成，前缀一旦含之即整支剪枝；
+ *   - 前缀基数一旦超过 s，后续并集只会更大，立即剪枝；
+ *   - (深度, 并集) 记忆化消除等价前缀（共享结构导致的路径合并）。
+ * 上限只对“最终极小族”计数：确认到第 limit+1 个极小割集时才判超限，
+ * 因此中间爆炸、最终收缩不会误报；门定义顺序与顶门输入顺序也不影响结论。
+ *
+ * 另有一道二级保护：极端模型（例如 30 个互不相交二元组相与 => 2^30 个候选）
+ * 的可行前缀本身就超过枚举预算时按 complexity_limit 中止，避免页面失去响应；
+ * 常规“先爆炸后收缩”的模型在到达叶子后会被吸收剪枝大规模裁掉，远低于预算。
  */
+const MAX_AND_ENUMERATION_STEPS = 4_000_000;
+
 function minimizeAnd(children: Mask[][], limit: number): Mask[] {
   if (children.length === 1) return children[0];
 
-  // 分支数少的子门先展开，尽早用极小割集剪枝后续分支。
-  const fams = [...children].sort((a, b) => a.length - b.length);
-  let frontier = fams[0];
+  // 大割集的子门排在前（其位约束最强，能尽早用“前缀基数>s”剪枝）；
+  // 仅为性能优化，与最终结果无关。
+  const fams = [...children].sort((a, b) => {
+    const am = Math.min(...a.map(bitCount));
+    const bm = Math.min(...b.map(bitCount));
+    return bm - am || a.length - b.length;
+  });
+  const n = fams.length;
+  const KEY_BASE = 2 ** 30;
 
-  for (let i = 1; i < fams.length; i += 1) {
-    const candidates = new Set<Mask>();
-    // (子门序号, 当前并集) 去重，避免等价路径指数重复。
-    const visited = new Set<number>();
-    const KEY_BASE = 2 ** 30;
-    for (const left of frontier) {
-      for (const right of fams[i]) {
-        const union = left | right;
-        const key = i * KEY_BASE + union;
-        if (visited.has(key)) continue;
-        visited.add(key);
-        candidates.add(union);
-      }
-    }
-
-    const buckets: Mask[][] = Array.from({ length: 31 }, () => []);
-    for (const candidate of candidates) {
-      buckets[bitCount(candidate)].push(candidate);
-    }
-
-    const next: Mask[] = [];
-    const nextSet = new Set<Mask>();
-    // 最终并集基数的下界：每个子门至少贡献其最小割集的位数。
-    const minSize = Math.min(...[...candidates].map(bitCount));
-    // 上界：所有候选位的并集（实际枚举不会超过它）。
-    const maxSize = Math.max(...[...candidates].map(bitCount));
-    for (let size = minSize; size <= maxSize; size += 1) {
-      for (const candidate of buckets[size]) {
-        // 已含更小的极小割集：后续并集只会更大，整条分支被吸收。
-        if (keptHasSubset(candidate, next, nextSet)) continue;
-        next.push(candidate);
-        nextSet.add(candidate);
-        if (next.length > limit) throw new LimitHit('', 0);
-      }
-    }
-    frontier = next;
+  let allBits: Mask = 0;
+  let lowerBound = 0;
+  for (const fam of fams) {
+    for (const cut of fam) allBits |= cut;
+    lowerBound = Math.max(lowerBound, Math.min(...fam.map(bitCount)));
   }
 
-  return frontier;
+  const kept: Mask[] = [];
+  const keptSet = new Set<Mask>();
+  let steps = 0;
+
+  for (let s = lowerBound; s <= bitCount(allBits); s += 1) {
+    // 本桶内确认的极小割集（基数恰为 s 且不含任何更小的已保留割集）。
+    const found = new Set<Mask>();
+    // (深度, 并集) 去重：同一状态的全部扩展完全一致。
+    const seen = new Set<number>();
+    let aborted = false;
+
+    const dfs = (depth: number, union: Mask): void => {
+      if (aborted) return;
+      steps += 1;
+      if (steps > MAX_AND_ENUMERATION_STEPS) {
+        aborted = true;
+        return;
+      }
+      // 上限只统计最终极小族：连同更小桶已确认的，达到第 limit+1 个即真实超限。
+      if (kept.length + found.size > limit) {
+        aborted = true;
+        return;
+      }
+      if (bitCount(union) > s) return;
+      if (keptHasSubset(union, kept, keptSet)) return;
+
+      if (depth === n) {
+        if (bitCount(union) === s) found.add(union);
+        return;
+      }
+
+      const key = depth * KEY_BASE + union;
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      for (const cut of fams[depth]) {
+        dfs(depth + 1, union | cut);
+        if (aborted) return;
+      }
+    };
+
+    dfs(0, 0);
+
+    // 二级保护触发：枚举预算耗尽，按超限中止该门（与真实超限同一出口）。
+    if (steps > MAX_AND_ENUMERATION_STEPS) throw new LimitHit('', 0);
+
+    for (const m of found) {
+      // 叶子兜底复检（吸收它的更小割集可能直到最后一步才被凑齐）。
+      if (!keptHasSubset(m, kept, keptSet)) {
+        kept.push(m);
+        keptSet.add(m);
+      }
+    }
+    if (kept.length > limit) throw new LimitHit('', 0);
+  }
+
+  return kept;
 }
 
 export function analyze(model: ParsedModel): Analysis {

@@ -7,7 +7,8 @@
 - 无业务后端、无任何在线调用：构建产物为纯静态文件（React/Vite 本地打包，无 CDN）。
 - 静态 Web 由 Dockerfile 多阶段构建（nginx 托管），通过 Docker Compose 发布。
 - 宿主机端口可通过 `WEB_PORT` 配置；提供 `/healthz` HTTP 健康检查。
-- Compose 中名为 `verify` 的一次性服务执行：代码测试 → 构建检查 → 规定场景断言 → HTTP 冒烟，
+- Compose 中名为 `verify` 的一次性服务执行：代码测试 → 构建检查 → 规定场景断言 → HTTP 冒烟
+  → 共享许可组合断言（冒烟成功后验证不误报超限），
   完成后自行退出，并用退出码报告结果。
 
 ## 输入语法
@@ -95,7 +96,10 @@ docker compose run --build verify
    - 吸收律：`A∨B∨(A∧B)` 最小割集恰为 `{A},{B}`；
    - 共享子门的事件归属（可选/无关）与共享门仅规范化一次；
    - 超限场景：`3^7=2187 > 2000` 报 `complexity_limit`，且边界 `2000` 完整输出；
-4. HTTP 冒烟：对 `web` 服务的 `/healthz` 与 `/` 做就绪重试与内容断言。
+4. HTTP 冒烟：对 `web` 服务的 `/healthz` 与 `/` 做就绪重试与内容断言；
+5. `scripts/verify-permission.ts` 共享许可组合断言（HTTP 冒烟成功后执行）：
+   五组 6 选 1 与许可门相与，中间组合达 `6^5=7776` 但最终仅 7 个极小割集
+   （6 个同后缀 + `A0,B1,C2,D3,E4` 交错组合），不得误报 `complexity_limit`。
 
 全部通过退出码为 0 并自行退出；任一步失败退出码非零。
 
@@ -108,7 +112,7 @@ src/core/
   validate.ts   # 缺失引用、自引用、Tarjan 环检测、命名冲突
   engine.ts     # 位掩码割集展开、吸收律消超集、每门 2000 上限、事件归属
   pipeline.ts   # 解析 → 校验 → 分析 编排
-  *.test.ts     # 核心算法测试（26 项）
+  *.test.ts     # 核心算法测试（含共享许可组合、输入重排、超限边界）
 src/App.tsx     # 编辑器、问题定位、结果与截断警示 UI
 src/App.test.tsx# 页面渲染/非法输入/截断 组件测试（3 项）
 scripts/        # verify 一次性服务脚本
