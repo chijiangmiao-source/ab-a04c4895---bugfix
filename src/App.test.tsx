@@ -70,4 +70,40 @@ describe('App 页面', () => {
     expect(text).toContain('结论不完整');
     expect(text).not.toContain('最小割集（0 个）');
   });
+
+  it('五组事件 + 七条许可组合：页面显示 7 个极小割集、30 个可选事件，不误报超限', () => {
+    const { container } = render();
+    const areas = container.querySelectorAll('textarea');
+    const letters = ['A', 'B', 'C', 'D', 'E'];
+    const ev: string[] = [];
+    for (const L of letters) for (let i = 0; i < 6; i += 1) ev.push(`${L}${i}`);
+    const lines: string[] = [];
+    for (const L of letters) {
+      lines.push(`G_${L} OR ${Array.from({ length: 6 }, (_, i) => `${L}${i}`).join(' ')}`);
+    }
+    for (let i = 0; i < 6; i += 1) {
+      lines.push(`P${i} AND A${i} B${i} C${i} D${i} E${i}`);
+    }
+    lines.push('PX AND A0 B1 C2 D3 E4');
+    lines.push('PERM OR P0 P1 P2 P3 P4 P5 PX');
+    lines.push('TOP AND PERM G_E G_A G_C G_D G_B');
+    setNative(areas[0], ev.join('\n'));
+    setNative(areas[1], lines.join('\n'));
+    setNative(container.querySelector('input')!, 'TOP');
+
+    const text = container.textContent ?? '';
+    expect(text).not.toContain('complexity_limit');
+    expect(text).toContain('最小割集（7 个）');
+    // 七条组合均展示（同后缀六条 + 交错一条）
+    expect(text).toContain('A0');
+    expect(text).toContain('B1');
+    expect(text).toContain('E4');
+    // 事件归属：无可选以外的类别出现计数
+    expect(text).toContain('基本事件归属');
+    // 门计数表中许可门与顶门均为 7
+    expect(text).toContain('PERM');
+    // 30 个事件全部出现在可选行：必现行为空
+    const mandatoryRow = text.match(/必现[\s\S]*?可选/);
+    expect(mandatoryRow![0]).not.toMatch(/[A-E][0-5]/);
+  });
 });

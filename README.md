@@ -7,8 +7,8 @@
 - 无业务后端、无任何在线调用：构建产物为纯静态文件（React/Vite 本地打包，无 CDN）。
 - 静态 Web 由 Dockerfile 多阶段构建（nginx 托管），通过 Docker Compose 发布。
 - 宿主机端口可通过 `WEB_PORT` 配置；提供 `/healthz` HTTP 健康检查。
-- Compose 中名为 `verify` 的一次性服务执行：代码测试 → 构建检查 → 规定场景断言 → HTTP 冒烟，
-  完成后自行退出，并用退出码报告结果。
+- Compose 中名为 `verify` 的一次性服务执行：代码测试 → 构建检查 → 规定场景断言 → HTTP 冒烟 →
+  共享许可组合场景，完成后自行退出，并用退出码报告结果。
 
 ## 输入语法
 
@@ -57,7 +57,8 @@ TOP    AND MAINF BKF
 因为截断结果可能遗漏更小的解释，不允许冒充完整结论。
 
 上限只对门的**最终**极小族判定：即使展开中途的原始组合数巨大（如与“全集”单割集
-相并后坍缩为 1 个割集），只要最终族 ≤ 2000 仍给出完整结果。
+相并后坍缩为 1 个割集，或五组 `6^5=7776` 种选择被 7 条许可组合约束后只剩 7 个），
+只要最终族 ≤ 2000 仍给出完整结果。
 
 ## 本地开发（无需 Docker）
 
@@ -91,11 +92,17 @@ docker compose run --build verify
 
 1. `npm test` 代码测试；
 2. `npm run build` 构建检查（tsc + vite build）；
-3. `scripts/verify-scenarios.ts` 规定场景断言：
+3. `scripts/verify-scenarios.ts core` 规定场景断言：
    - 吸收律：`A∨B∨(A∧B)` 最小割集恰为 `{A},{B}`；
    - 共享子门的事件归属（可选/无关）与共享门仅规范化一次；
    - 超限场景：`3^7=2187 > 2000` 报 `complexity_limit`，且边界 `2000` 完整输出；
-4. HTTP 冒烟：对 `web` 服务的 `/healthz` 与 `/` 做就绪重试与内容断言。
+4. HTTP 冒烟：对 `web` 服务的 `/healthz` 与 `/` 做就绪重试与内容断言；
+5. `scripts/verify-scenarios.ts permission` 共享许可组合场景（仅在冒烟成功后执行）：
+   - 五组各 6 个事件（A0–A5…E0–E5）经 OR 门汇总，六条同后缀 AND 组合与一条
+     `A0·B1·C2·D3·E4` 交错组合汇入许可 OR 门，顶门再与五个分组门 AND；
+   - 顶门最终恰有 7 个极小割集，许可门与顶门计数均为 7，30 个事件全部可选，
+     不得误报 `complexity_limit`；门定义/顶门输入重排结论不变；
+   - 去掉许可约束的同结构模型（`6^5=7776`）仍须如实报 `complexity_limit`。
 
 全部通过退出码为 0 并自行退出；任一步失败退出码非零。
 
@@ -108,9 +115,9 @@ src/core/
   validate.ts   # 缺失引用、自引用、Tarjan 环检测、命名冲突
   engine.ts     # 位掩码割集展开、吸收律消超集、每门 2000 上限、事件归属
   pipeline.ts   # 解析 → 校验 → 分析 编排
-  *.test.ts     # 核心算法测试（26 项）
+  *.test.ts     # 核心算法测试（29 项）
 src/App.tsx     # 编辑器、问题定位、结果与截断警示 UI
-src/App.test.tsx# 页面渲染/非法输入/截断 组件测试（3 项）
+src/App.test.tsx# 页面渲染/非法输入/截断/许可组合 组件测试（4 项）
 scripts/        # verify 一次性服务脚本
 nginx.conf      # 静态托管 + /healthz
 Dockerfile      # deps / builder / verify / runtime 多目标

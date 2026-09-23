@@ -75,62 +75,132 @@ function minimizeOr(children: Mask[][], limit: number): Mask[] {
   return kept;
 }
 
+interface HeapNode {
+  /** 队列键：当前并集基数 = 最终基数的容许下界（合取只会增位） */
+  key: number;
+  /** 已合并的子门数 */
+  depth: number;
+  mask: Mask;
+}
+
+/** 以 (基数升序, 深度降序, 掩码升序) 排序的二叉堆；同基数优先深化以尽早拿到极小割集剪枝。 */
+class SearchHeap {
+  private nodes: HeapNode[] = [];
+
+  get size(): number {
+    return this.nodes.length;
+  }
+
+  push(node: HeapNode): void {
+    const h = this.nodes;
+    h.push(node);
+    let i = h.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (!this.less(h[i], h[parent])) break;
+      [h[i], h[parent]] = [h[parent], h[i]];
+      i = parent;
+    }
+  }
+
+  pop(): HeapNode {
+    const h = this.nodes;
+    const top = h[0];
+    const last = h.pop()!;
+    if (h.length > 0) {
+      h[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let smallest = i;
+        if (l < h.length && this.less(h[l], h[smallest])) smallest = l;
+        if (r < h.length && this.less(h[r], h[smallest])) smallest = r;
+        if (smallest === i) break;
+        [h[i], h[smallest]] = [h[smallest], h[i]];
+        i = smallest;
+      }
+    }
+    return top;
+  }
+
+  private less(a: HeapNode, b: HeapNode): boolean {
+    if (a.key !== b.key) return a.key < b.key;
+    if (a.depth !== b.depth) return a.depth > b.depth;
+    return a.mask < b.mask;
+  }
+}
+
 /**
  * AND 归并：候选割集 = 从每个子门各取一个割集后的并集，再取极小族。
  *
  * 不能按输入逐个折叠并在中间结果上判上限——后续合取支可能使族大幅坍缩
- * （例如 2187 个组合再与“全部事件”单割集相与，最终只剩 1 个）。
- * 这里对全部子门做组合枚举，并按最终并集的基数 s 从小到大处理：
- * 基数更大的候选不可能吸收更小的候选，所以处理完 s 后，
- * 大小 ≤s 的极小割集已经全部确定，保留集此后只增不减，
- * 此时越过上限即为门最终族的真实超限。
+ * （五个 6 选 1 组先折叠出 6^5=7776 个组合，再与仅 7 个割集的“许可
+ * 组合”门相与，最终族只有 7 个；旧实现按族大小排序使许可门最后参与，
+ * 于是在中间折叠处误报超限）。这里改用最佳优先的分支限界枚举最终乘积：
+ * 状态按当前并集基数（最终基数的容许下界）出队，完整割集按基数非降序
+ * 落定；已确认的极小割集用于吸收/剪枝；上限只在最终极小族上判定。
  */
 function minimizeAnd(children: Mask[][], limit: number): Mask[] {
   if (children.length === 1) return children[0];
 
-  // 分支数少的子门先展开，尽早用极小割集剪枝后续分支。
-  const fams = [...children].sort((a, b) => a.length - b.length);
-  let frontier = fams[0];
+  // 大割集（强约束）子门排在最前，使极小割集尽早落定、最大化剪枝；
+  // 排序只依据族内容的确定性指标，与门定义/输入书写顺序无关。
+  const stats = children.map((fam) => {
+    let max = 0;
+    let total = 0;
+    let min = Infinity;
+    for (const m of fam) {
+      const b = bitCount(m);
+      if (b > max) max = b;
+      total += b;
+      if (m < min) min = m;
+    }
+    return { fam, max, total, min, length: fam.length };
+  });
+  stats.sort(
+    (a, b) =>
+      b.max - a.max || b.total - a.total || a.length - b.length || a.min - b.min
+  );
+  const fams = stats.map((s) => s.fam);
+  const depthCount = fams.length;
 
-  for (let i = 1; i < fams.length; i += 1) {
-    const candidates = new Set<Mask>();
-    // (子门序号, 当前并集) 去重，避免等价路径指数重复。
-    const visited = new Set<number>();
-    const KEY_BASE = 2 ** 30;
-    for (const left of frontier) {
-      for (const right of fams[i]) {
-        const union = left | right;
-        const key = i * KEY_BASE + union;
-        if (visited.has(key)) continue;
-        visited.add(key);
-        candidates.add(union);
-      }
+  const heap = new SearchHeap();
+  heap.push({ key: 0, depth: 0, mask: 0 });
+
+  // (depth, mask) 去重：不同选择路径可能给出同一部分并集。
+  const visited = new Set<number>([0]);
+  const KEY_BASE = 2 ** 30;
+
+  const kept: Mask[] = [];
+  const keptSet = new Set<Mask>();
+
+  // 最佳优先分支限界：按当前并集基数出队（最终基数的容许下界），
+  // 因此完整割集按基数非降序产出；后产出者不可能吸收先产出者，
+  // 保留集只增不减，越过上限即为门最终族的真实超限。
+  while (heap.size > 0) {
+    const { depth, mask } = heap.pop();
+    if (keptHasSubset(mask, kept, keptSet)) continue;
+
+    if (depth === depthCount) {
+      kept.push(mask);
+      keptSet.add(mask);
+      if (kept.length > limit) throw new LimitHit('', 0);
+      continue;
     }
 
-    const buckets: Mask[][] = Array.from({ length: 31 }, () => []);
-    for (const candidate of candidates) {
-      buckets[bitCount(candidate)].push(candidate);
+    for (const part of fams[depth]) {
+      const union = mask | part;
+      // 已含更小的极小割集：后续并集只会更大，整条分支被吸收。
+      if (keptHasSubset(union, kept, keptSet)) continue;
+      const key = (depth + 1) * KEY_BASE + union;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      heap.push({ key: bitCount(union), depth: depth + 1, mask: union });
     }
-
-    const next: Mask[] = [];
-    const nextSet = new Set<Mask>();
-    // 最终并集基数的下界：每个子门至少贡献其最小割集的位数。
-    const minSize = Math.min(...[...candidates].map(bitCount));
-    // 上界：所有候选位的并集（实际枚举不会超过它）。
-    const maxSize = Math.max(...[...candidates].map(bitCount));
-    for (let size = minSize; size <= maxSize; size += 1) {
-      for (const candidate of buckets[size]) {
-        // 已含更小的极小割集：后续并集只会更大，整条分支被吸收。
-        if (keptHasSubset(candidate, next, nextSet)) continue;
-        next.push(candidate);
-        nextSet.add(candidate);
-        if (next.length > limit) throw new LimitHit('', 0);
-      }
-    }
-    frontier = next;
   }
 
-  return frontier;
+  return kept;
 }
 
 export function analyze(model: ParsedModel): Analysis {

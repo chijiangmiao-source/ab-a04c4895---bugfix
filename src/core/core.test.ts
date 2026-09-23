@@ -261,6 +261,145 @@ describe('complexity limit', () => {
   });
 });
 
+describe('shared permission combinations（五组事件 + 七条许可组合）', () => {
+  const letters = ['A', 'B', 'C', 'D', 'E'] as const;
+
+  function buildEvents(): string[] {
+    const events: string[] = [];
+    for (const L of letters) for (let i = 0; i < 6; i += 1) events.push(`${L}${i}`);
+    return events;
+  }
+
+  function buildGateLines(): string[] {
+    const lines: string[] = [];
+    for (const L of letters) {
+      lines.push(`G_${L} OR ${Array.from({ length: 6 }, (_, i) => `${L}${i}`).join(' ')}`);
+    }
+    for (let i = 0; i < 6; i += 1) {
+      lines.push(`P${i} AND A${i} B${i} C${i} D${i} E${i}`);
+    }
+    lines.push('PX AND A0 B1 C2 D3 E4');
+    lines.push(`PERM OR ${[0, 1, 2, 3, 4, 5].map((i) => `P${i}`).join(' ')} PX`);
+    lines.push('TOP AND G_A G_B G_C G_D G_E PERM');
+    return lines;
+  }
+
+  // 输出按集合元组字典序排序：A0·B0… 先于 A0·B1…，再到 A1·B1…
+  const expectedCuts = [
+    ['A0', 'B0', 'C0', 'D0', 'E0'],
+    ['A0', 'B1', 'C2', 'D3', 'E4'],
+    ['A1', 'B1', 'C1', 'D1', 'E1'],
+    ['A2', 'B2', 'C2', 'D2', 'E2'],
+    ['A3', 'B3', 'C3', 'D3', 'E3'],
+    ['A4', 'B4', 'C4', 'D4', 'E4'],
+    ['A5', 'B5', 'C5', 'D5', 'E5']
+  ];
+
+  function shuffle<T>(arr: T[], seed: number): T[] {
+    const a = [...arr];
+    let s = seed;
+    for (let i = a.length - 1; i > 0; i -= 1) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      const j = s % (i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function parseLines(lines: string[]): ParsedModel['gates'] {
+    return lines.map((line, i) => {
+      const [name, type, ...inputs] = line.trim().split(/\s+/);
+      return { name, type: type as 'AND' | 'OR', inputs, line: i + 1 };
+    });
+  }
+
+  it('七个极小割集（六条同后缀 + 交错组合）完整输出，不误报 complexity_limit', () => {
+    const r = analyze({ events: buildEvents(), gates: parseLines(buildGateLines()), top: 'TOP' });
+    expect(r.status).toBe('complete');
+    if (r.status !== 'complete') return;
+    expect(r.cutsets).toHaveLength(7);
+    expect(r.cutsets).toEqual(expectedCuts);
+    // 七条组合均不得被截断或扩展：每个割集恰为五个事件
+    expect(r.cutsets.every((c) => c.length === 5)).toBe(true);
+    // 许可组合门与顶门的规范化割集数都应为 7
+    expect(r.gateCounts.PERM).toBe(7);
+    expect(r.gateCounts.TOP).toBe(7);
+    // 30 个基本事件全部归为可选，无必现/无关
+    const roles = Object.values(r.classification);
+    expect(roles).toHaveLength(30);
+    expect(roles.every((role) => role === 'optional')).toBe(true);
+  });
+
+  it('门定义顺序与顶门输入顺序变化不改变结论', () => {
+    const lines = buildGateLines();
+    const defs = new Map(parseLines(lines).map((g) => [g.name, g]));
+    const topLine = lines[lines.length - 1];
+
+    for (let seed = 1; seed <= 8; seed += 1) {
+      const otherNames = [...defs.keys()].filter((n) => n !== 'TOP');
+      const ordered = shuffle(otherNames, seed);
+      // 让顶门在不同位置定义，而不只是最后一行
+      const insertAt = seed % ordered.length;
+      ordered.splice(insertAt, 0, 'TOP');
+      const gates = ordered.map((name, i) => ({ ...defs.get(name)!, line: i + 1 }));
+
+      // 顶门输入随机重排（含 PERM 出现在最前/最后/中间）
+      const topGate = gates.find((g) => g.name === 'TOP')!;
+      topGate.inputs = shuffle(['G_A', 'G_B', 'G_C', 'G_D', 'G_E', 'PERM'], seed * 31 + 7);
+      // 同时重排一个许可门与一个分组门的输入
+      const p3 = gates.find((g) => g.name === 'P3')!;
+      p3.inputs = shuffle(p3.inputs, seed * 13 + 1);
+      const gd = gates.find((g) => g.name === 'G_D')!;
+      gd.inputs = shuffle(gd.inputs, seed * 17 + 3);
+
+      const r = analyze({ events: shuffle(buildEvents(), seed * 7 + 3), gates, top: 'TOP' });
+      expect(r.status, `seed ${seed}`).toBe('complete');
+      if (r.status !== 'complete') continue;
+      expect(r.cutsets, `seed ${seed}`).toEqual(expectedCuts);
+      expect(r.gateCounts.PERM, `seed ${seed}`).toBe(7);
+      expect(r.gateCounts.TOP, `seed ${seed}`).toBe(7);
+      const roles = Object.values(r.classification);
+      expect(roles, `seed ${seed}`).toHaveLength(30);
+      expect(roles.every((role) => role === 'optional'), `seed ${seed}`).toBe(true);
+    }
+
+    // 顶门输入中 PERM 在最前（旧实现按族大小排序时最先参与）与最后两种极端顺序
+    for (const permFirst of [true, false]) {
+      const inputs = permFirst
+        ? ['PERM', 'G_A', 'G_B', 'G_C', 'G_D', 'G_E']
+        : ['G_A', 'G_B', 'G_C', 'G_D', 'G_E', 'PERM'];
+      const gates = parseLines([...lines.slice(0, -1), `TOP AND ${inputs.join(' ')}`]);
+      const r = analyze({ events: buildEvents(), gates, top: 'TOP' });
+      expect(r.status).toBe('complete');
+      if (r.status === 'complete') {
+        expect(r.cutsets).toEqual(expectedCuts);
+        expect(r.gateCounts.TOP).toBe(7);
+      }
+    }
+    void topLine;
+  });
+
+  it('同结构最终极小割集确实超过 2000 时仍返回 complexity_limit（真实超限边界）', () => {
+    // 对照模型：复用同样的五组 6 选 1（30 个事件），但顶门不接许可组合门——
+    // 顶门最终族为 6^5 = 7776 > 2000，无任何后续合取可使其坍缩，
+    // 必须报告 complexity_limit，且不输出割集/归属。
+    const r = analyze({
+      events: buildEvents(),
+      gates: parseLines([
+        ...letters.map((L) => `G_${L} OR ${Array.from({ length: 6 }, (_, i) => `${L}${i}`).join(' ')}`),
+        'TOP AND G_A G_B G_C G_D G_E'
+      ]),
+      top: 'TOP'
+    });
+    expect(r.status).toBe('complexity_limit');
+    if (r.status === 'complexity_limit') {
+      expect(r.gate).toBe('TOP');
+      expect(r.limit).toBe(2000);
+      expect('cutsets' in r).toBe(false);
+    }
+  });
+});
+
 describe('pipeline 集成（航天器供电示例）', () => {
   const EVENTS = `BUS_FAULT\nMAIN_SRC\nMAIN_SW\nBK_SRC\nBK_SW\nCOMMON_CTRL\nCOSMIC\n`;
   const GATES =
